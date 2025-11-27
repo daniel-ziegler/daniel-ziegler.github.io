@@ -1,0 +1,997 @@
+<html>
+<head>
+<title>Gear Puzzle</title>
+<style type="text/css">
+body {
+    margin: 0;
+    padding: 0;
+    background-color: #1a1a2e;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+}
+canvas {
+    background-color: #16213e;
+}
+#controls {
+    position: fixed;
+    top: 10px;
+    left: 10px;
+    background: rgba(0,0,0,0.7);
+    padding: 15px;
+    border-radius: 8px;
+    color: #fff;
+    font-family: monospace;
+    z-index: 100;
+}
+#controls label {
+    display: block;
+    margin-bottom: 10px;
+}
+#controls input[type="range"] {
+    width: 150px;
+    margin-left: 10px;
+}
+</style>
+</head>
+<body>
+<div id="controls">
+    <label>Sun Speed: <span id="sunVal">1.00</span>
+        <input type="range" id="sunSlider" min="-2" max="2" step="0.05" value="1">
+    </label>
+    <label>Carrier Speed: <span id="carrierVal">-0.25</span>
+        <input type="range" id="carrierSlider" min="-1" max="1" step="0.05" value="-0.25">
+    </label>
+</div>
+<canvas id="gear_canvas" width="800" height="800"></canvas>
+
+<script src="gear_math.js"></script>
+<script>
+// Graphics library
+var graphics = {
+    component_to_hex: function(c) {
+        var hex = Math.floor(c).toString(16);
+        return hex.length == 1 ? "0" + hex : hex;
+    },
+
+    rgb_to_hex: function(r, g, b) {
+        return "#" + this.component_to_hex(r) + this.component_to_hex(g) + this.component_to_hex(b);
+    },
+
+    init: function(canvas, bounds) {
+        var gctx = {
+            canvas: canvas,
+            context: canvas.getContext("2d"),
+            width: canvas.width,
+            height: canvas.height,
+            bounds: bounds,
+            colour: this.rgb_to_hex(0,0,0)
+        };
+        return gctx;
+    },
+
+    clear: function(gctx) {
+        gctx.context.fillStyle = '#16213e';
+        gctx.context.fillRect(0, 0, gctx.canvas.width, gctx.canvas.height);
+    },
+
+    color: function(gctx, r, g, b) {
+        gctx.colour = this.rgb_to_hex(r, g, b);
+    },
+
+    map_point: function(gctx, pnt) {
+        var scaleX = gctx.width / (gctx.bounds[1] - gctx.bounds[0]);
+        var scaleY = gctx.height / (gctx.bounds[3] - gctx.bounds[2]);
+        var scale = Math.min(scaleX, scaleY);
+        var worldWidth = gctx.bounds[1] - gctx.bounds[0];
+        var worldHeight = gctx.bounds[3] - gctx.bounds[2];
+        var offsetX = (gctx.width - worldWidth * scale) / 2;
+        var offsetY = (gctx.height - worldHeight * scale) / 2;
+        return [offsetX + (pnt[0] - gctx.bounds[0]) * scale,
+                offsetY + (pnt[1] - gctx.bounds[2]) * scale];
+    },
+
+    circle: function(gctx, center, rad) {
+        var cen = this.map_point(gctx, center);
+        var edge = this.map_point(gctx, [center[0] + rad, center[1]]);
+        var r = edge[0] - cen[0];
+        gctx.context.beginPath();
+        gctx.context.arc(cen[0], cen[1], r, 0, 2 * Math.PI);
+        gctx.context.strokeStyle = gctx.colour;
+        gctx.context.stroke();
+    },
+
+    fillCircle: function(gctx, center, rad) {
+        var cen = this.map_point(gctx, center);
+        var edge = this.map_point(gctx, [center[0] + rad, center[1]]);
+        var r = edge[0] - cen[0];
+        gctx.context.beginPath();
+        gctx.context.arc(cen[0], cen[1], r, 0, 2 * Math.PI);
+        gctx.context.fillStyle = gctx.colour;
+        gctx.context.fill();
+    },
+
+    text: function(gctx, center, txt, size) {
+        var cen = this.map_point(gctx, center);
+        var edge = this.map_point(gctx, [center[0] + size, center[1]]);
+        var fontSize = (edge[0] - cen[0]) * 1.5;
+        gctx.context.font = 'bold ' + fontSize + 'px Arial';
+        gctx.context.fillStyle = gctx.colour;
+        gctx.context.textAlign = 'center';
+        gctx.context.textBaseline = 'middle';
+        gctx.context.fillText(txt, cen[0], cen[1]);
+    },
+
+    polyline: function(gctx, pnts, close) {
+        gctx.context.fillStyle = gctx.colour;
+        gctx.context.strokeStyle = '#0f0f23';
+        gctx.context.lineWidth = 1;
+        gctx.context.beginPath();
+        var p = this.map_point(gctx, pnts[0]);
+        gctx.context.moveTo(p[0], p[1]);
+        for(var i = 1; i < pnts.length; i++) {
+            p = this.map_point(gctx, pnts[i]);
+            gctx.context.lineTo(p[0], p[1]);
+        }
+        gctx.context.closePath();
+        gctx.context.fill();
+        gctx.context.stroke();
+    }
+};
+
+// Gears library
+var gears = {
+    point_radius: function(pnt) {
+        return Math.sqrt(pnt[0]*pnt[0] + pnt[1]*pnt[1]);
+    },
+
+    // Rotate point around center. Math convention (CCW-positive).
+    rotate_point: function(cen, pnt, theta) {
+        var tpnt = [pnt[0]-cen[0], pnt[1]-cen[1]];
+        var c = Math.cos(theta), s = Math.sin(theta);
+        return [c*tpnt[0] + s*tpnt[1] + cen[0], -s*tpnt[0] + c*tpnt[1] + cen[1]];
+    },
+
+    involute_point: function(r, theta) {
+        return [r*(Math.cos(theta)+theta*Math.sin(theta)),
+                -r*(Math.sin(theta)-theta*Math.cos(theta))];
+    },
+
+    involute_bisect: function(r_base, r_target) {
+        var theta_lo = 0.0, theta_hi = Math.PI;
+        for(var i = 0; i < 20; i++) {
+            var theta_mi = (theta_lo + theta_hi) / 2.0;
+            var r_mi = this.point_radius(this.involute_point(r_base, theta_mi));
+            if(r_mi <= r_target) theta_lo = theta_mi;
+            else theta_hi = theta_mi;
+        }
+        return (theta_lo + theta_hi) / 2.0;
+    },
+
+    involute_curve: function(r_base, r_min, r_max, N) {
+        var theta_hi = this.involute_bisect(r_base, r_max);
+        var curve = [];
+        if(r_min < r_base) curve.push([r_min, 0]);
+        var dtheta = theta_hi / (N - 1);
+        for(var i = 0; i < N; i++) {
+            curve.push(this.involute_point(r_base, i * dtheta));
+        }
+        return curve;
+    },
+
+    generate: function(module, pressure_angle, num_teeth) {
+        var Rp = module * num_teeth / 2.0;
+        var Rb = Rp * Math.cos(pressure_angle);
+        var Rd = Rp - 1.2 * module;
+        var Ra = Rp + 1.0 * module;
+        var t = Math.PI * Rp / num_teeth;
+
+        var p_cross = this.involute_point(Rb, this.involute_bisect(Rb, Rp));
+        var theta_cross = Math.atan2(p_cross[1], p_cross[0]);
+        var dtheta = t / Rp;
+
+        var tmp = this.involute_curve(Rb, Rd, Ra, 20);
+        var involute = [];
+        for(var i = 0; i < tmp.length; i++) {
+            var tpnt = this.rotate_point([0,0], tmp[i], theta_cross - dtheta/2);
+            if(Math.atan2(tpnt[1], tpnt[0]) < Math.PI/num_teeth && tpnt[1] > 0) {
+                involute.push([tmp[i][0], tmp[i][1]]);
+            }
+        }
+
+        var gear = [];
+        for(var i = 0; i < num_teeth; i++) {
+            var theta = i * 2 * Math.PI / num_teeth + theta_cross - dtheta/2;
+            var theta2 = i * 2 * Math.PI / num_teeth - theta_cross + dtheta/2;
+            for(var j = 0; j < involute.length; j++) {
+                gear.push(this.rotate_point([0,0], involute[j], theta));
+            }
+            for(var j = involute.length - 1; j >= 0; j--) {
+                gear.push(this.rotate_point([0,0], [involute[j][0], -involute[j][1]], theta2));
+            }
+        }
+        return gear;
+    },
+
+    translate: function(gear, offset) {
+        return gear.map(function(p) { return [p[0] + offset[0], p[1] + offset[1]]; });
+    },
+
+    // Rotate gear shape. Math convention (CCW-positive).
+    rotate: function(gear, angle) {
+        var c = Math.cos(angle), s = Math.sin(angle);
+        return gear.map(function(p) { return [c*p[0] + s*p[1], -s*p[0] + c*p[1]]; });
+    },
+
+    // Generate carrier structure with inner ring, outer gear ring, and spokes
+    generateCarrier: function(module, pressure_angle, innerRadius, outerTeeth, spokeCount, spokeWidth) {
+        // Inner ring (plain circle)
+        var innerRingOuter = innerRadius + 0.8 * module;
+        var innerRingInner = innerRadius - 0.8 * module;
+
+        // Outer gear ring
+        var outerGear = this.generate(module, pressure_angle, outerTeeth);
+        var outerRp = module * outerTeeth / 2.0;
+        var outerRootR = outerRp - 1.2 * module;
+        var outerRimInner = outerRootR - 1.0 * module;
+
+        return {
+            innerRingOuter: innerRingOuter,
+            innerRingInner: innerRingInner,
+            outerGear: outerGear,
+            outerRimInner: outerRimInner,
+            spokeCount: spokeCount,
+            spokeWidth: spokeWidth
+        };
+    },
+
+    // Generate internal (ring) gear with optional external teeth
+    generateInternal: function(module, pressure_angle, num_teeth, outer_teeth) {
+        // Generate internal teeth profile
+        var externalGear = this.generate(module, pressure_angle, num_teeth);
+
+        // Find min and max radius of the external gear
+        var maxR = 0, minR = Infinity;
+        for (var i = 0; i < externalGear.length; i++) {
+            var r = this.point_radius(externalGear[i]);
+            if (r > maxR) maxR = r;
+            if (r < minR) minR = r;
+        }
+
+        var Rp = module * num_teeth / 2.0;
+
+        // Inner edge of teeth (tooth roots) - positioned for visual meshing with planets
+        var rootR = Rp + 1.0 * module;
+
+        // Mirror and offset: flip profile and position so roots are at rootR
+        var self = this;
+        var internalProfile = externalGear.map(function(p) {
+            var r = self.point_radius(p);
+            var angle = Math.atan2(p[1], p[0]);
+            var flippedR = maxR + minR - r;
+            var offset = rootR - maxR;
+            var newR = flippedR + offset;
+            return [newR * Math.cos(angle), newR * Math.sin(angle)];
+        });
+
+        // Find internal profile's outer edge (where internal tooth roots are)
+        var internalOuterR = 0;
+        for (var i = 0; i < internalProfile.length; i++) {
+            var r = this.point_radius(internalProfile[i]);
+            if (r > internalOuterR) internalOuterR = r;
+        }
+
+        // Generate external teeth if requested
+        var outerProfile = null;
+        var outerRadius = internalOuterR + 2 * module; // default rim if no outer teeth
+
+        if (outer_teeth) {
+            var outerGear = this.generate(module, pressure_angle, outer_teeth);
+            var outerRp = module * outer_teeth / 2.0;
+            var outerRootR = outerRp - 1.2 * module;
+
+            // Position outer gear at standard position (pitch radius = module * teeth / 2)
+            var outerOffset = 0;  // No offset - standard gear position
+
+            outerProfile = outerGear.map(function(p) {
+                var r = self.point_radius(p);
+                var angle = Math.atan2(p[1], p[0]);
+                var newR = r + outerOffset;
+                return [newR * Math.cos(angle), newR * Math.sin(angle)];
+            });
+
+            // Find outer radius (tip of external teeth)
+            outerRadius = 0;
+            for (var i = 0; i < outerProfile.length; i++) {
+                var r = this.point_radius(outerProfile[i]);
+                if (r > outerRadius) outerRadius = r;
+            }
+        }
+
+        return {
+            profile: internalProfile,
+            outerProfile: outerProfile,
+            outerRadius: outerRadius,
+            innerOuterR: internalOuterR  // Where internal tooth roots are
+        };
+    }
+};
+
+// Puzzle configuration
+var puzzle = {
+    module: 1.0,
+    pa: 20 * Math.PI / 180,
+    baseSpeed: 0.8,
+
+    // Axles: each has position, array of gear teeth, and mesh info
+    // meshParent: which axle this meshes with
+    // meshGearIdx: which gear on this axle meshes (0 = first/outer)
+    // parentGearIdx: which gear on parent meshes
+    axles: []
+};
+
+function setupPuzzle() {
+    var m = puzzle.module;
+
+    // Helper to calculate mesh distance
+    function meshDist(t1, t2) {
+        return m * (t1 + t2) / 2;
+    }
+
+    // Helper to position gear at angle and distance from another (CCW-positive)
+    function posAt(parent, angle, dist) {
+        return [parent[0] + dist * Math.cos(angle), parent[1] - dist * Math.sin(angle)];
+    }
+
+    var center = [0, 0];
+    var axles = [];
+
+    // Planetary gearset configuration
+    var sunTeeth = 12;
+    var planetTeeth = 6;
+    var ringTeeth = sunTeeth + 2 * planetTeeth;  // Must equal sun + 2*planet for proper mesh
+    var numPlanets = 3;
+    var gearRatio = sunTeeth / planetTeeth;
+
+    // Carrier outer gear teeth - should be larger than ring gear
+    var carrierOuterTeeth = 42;
+    var orbitRadius = meshDist(sunTeeth, planetTeeth);
+
+    // Store config for dynamic updates
+    puzzle.planetary = {
+        sunTeeth: sunTeeth,
+        planetTeeth: planetTeeth,
+        ringTeeth: ringTeeth,
+        gearRatio: gearRatio,
+        carrierOuterTeeth: carrierOuterTeeth,
+        orbitRadius: orbitRadius
+    };
+
+    // Carrier structure (behind everything)
+    axles.push({
+        id: 'carrier',
+        pos: center,
+        gears: [carrierOuterTeeth],
+        colors: [[180, 130, 70]],  // Orange/bronze - distinct from blue planets
+        meshParent: null,
+        speedMult: 0,  // Updated dynamically (carrier speed)
+        meshDir: 1,
+        phaseOffset: 0,
+        isCarrier: true,
+        carrierConfig: {
+            innerRadius: orbitRadius,
+            spokeCount: numPlanets,
+            spokeWidth: 1.5
+        },
+        zPriority: -2
+    });
+
+    // Ring gear (internal teeth + external teeth)
+    var ringOuterTeeth = 33;  // External teeth for meshing with other gears
+    axles.push({
+        id: 'ring',
+        pos: center,
+        gears: [ringTeeth],
+        outerTeeth: ringOuterTeeth,
+        colors: [[120, 90, 200]],
+        meshParent: null,
+        speedMult: 0,  // Updated dynamically
+        meshDir: 1,
+        phaseOffset: 0,
+        isInternal: true,
+        zPriority: -1
+    });
+
+    // Sun gear (center)
+    axles.push({
+        id: 'sun',
+        pos: center,
+        gears: [sunTeeth],
+        colors: [[255, 200, 80]],
+        meshParent: null,
+        speedMult: 1,  // Updated dynamically
+        meshDir: 1,
+        phaseOffset: 0
+    });
+
+    // Planet gears - orbit around sun on carrier
+    for (var i = 0; i < numPlanets; i++) {
+        var angle = i * 2 * Math.PI / numPlanets;
+        axles.push({
+            id: 'planet' + i,
+            pos: posAt(center, angle, meshDist(sunTeeth, planetTeeth)),
+            gears: [planetTeeth],
+            colors: [[100, 180, 255]],
+            meshParent: 'sun',
+            meshGearIdx: 0,
+            parentGearIdx: 0,
+            speedMult: gearRatio,  // Updated dynamically
+            meshDir: -1,
+            orbits: 'sun',
+            orbitSpeed: 0,  // Updated dynamically
+            orbitRadius: meshDist(sunTeeth, planetTeeth),
+            orbitPhase: angle
+        });
+    }
+
+    // Small gear meshing with carrier outer gear
+    var carrierMeshTeeth = 10;
+    var carrierMeshAngle = Math.PI * 0.75;  // Upper left
+    axles.push({
+        id: 'carrierMesh',
+        pos: posAt(center, carrierMeshAngle, meshDist(carrierOuterTeeth, carrierMeshTeeth)),
+        gears: [carrierMeshTeeth],
+        colors: [[200, 100, 150]],
+        meshParent: 'carrier',
+        meshGearIdx: 0,
+        parentGearIdx: 0,
+        meshDir: -1,
+        phaseOffset: 0
+    });
+
+    // Small gear meshing with ring gear external teeth
+    var ringMeshTeeth = 14;
+    var ringMeshAngle = Math.PI * 0.25;  // Upper right
+    axles.push({
+        id: 'ringMesh',
+        pos: posAt(center, ringMeshAngle, meshDist(ringOuterTeeth, ringMeshTeeth)),
+        gears: [ringMeshTeeth],
+        colors: [[150, 200, 100]],
+        meshParent: 'ring',
+        meshGearIdx: 0,
+        parentGearIdx: 0,
+        meshDir: -1,
+        phaseOffset: 0,
+        meshWithOuter: true  // Flag to mesh with ring's outer teeth
+    });
+
+    puzzle.axles = axles;
+
+    // Calculate speed multipliers and mesh phases
+    calculateSpeeds();
+    calculatePhaseOffsets();
+
+    // Pre-generate gear shapes
+    var teethCache = {};
+    var internalCache = {};
+    puzzle.axles.forEach(function(axle) {
+        if (axle.isCarrier) {
+            // Carrier structure
+            var cfg = axle.carrierConfig;
+            axle.carrierShape = gears.generateCarrier(
+                puzzle.module, puzzle.pa,
+                cfg.innerRadius, axle.gears[0], cfg.spokeCount, cfg.spokeWidth
+            );
+        } else if (axle.isInternal) {
+            // Internal gear - generate ring profile with optional outer teeth
+            var outerTeeth = axle.outerTeeth || null;
+            var cacheKey = axle.gears[0] + '_' + (outerTeeth || 'none');
+            if (!internalCache[cacheKey]) {
+                internalCache[cacheKey] = gears.generateInternal(puzzle.module, puzzle.pa, axle.gears[0], outerTeeth);
+            }
+            axle.gearShapes = [internalCache[cacheKey]];
+        } else {
+            // External gear
+            axle.gearShapes = axle.gears.map(function(teeth) {
+                if (!teethCache[teeth]) {
+                    teethCache[teeth] = gears.generate(puzzle.module, puzzle.pa, teeth);
+                }
+                return teethCache[teeth];
+            });
+        }
+    });
+}
+
+function calculateSpeeds() {
+    var axleMap = {};
+    puzzle.axles.forEach(function(a) { axleMap[a.id] = a; });
+
+    // Find root axle (no parent, and speedMult not already set)
+    var root = puzzle.axles.find(function(a) {
+        return a.meshParent === null && a.speedMult === undefined;
+    });
+    if (!root) return;  // All axles already configured
+
+    var queue = [root.id];
+    root.speedMult = 1;
+    root.meshDir = 1;
+    root.depth = 0;
+
+    while (queue.length > 0) {
+        var currentId = queue.shift();
+        var current = axleMap[currentId];
+
+        puzzle.axles.forEach(function(axle) {
+            if (axle.meshParent === currentId && axle.speedMult === undefined) {
+                // For ring gear outer teeth, use outerTeeth instead of gears[]
+                var parentGearTeeth = axle.meshWithOuter && current.outerTeeth
+                    ? current.outerTeeth
+                    : current.gears[axle.parentGearIdx];
+                var myGearTeeth = axle.gears[axle.meshGearIdx];
+
+                // Speed ratio: my speed = parent speed * (parent teeth / my teeth)
+                // Direction reverses at each mesh
+                axle.speedMult = current.speedMult * (parentGearTeeth / myGearTeeth);
+                axle.meshDir = -current.meshDir;
+                axle.depth = current.depth + 1;
+
+                queue.push(axle.id);
+            }
+        });
+    }
+}
+
+function calculatePhaseOffsets() {
+    var axleMap = {};
+    puzzle.axles.forEach(function(a) { axleMap[a.id] = a; });
+
+    // Find root axle (no parent, and phaseOffset not already set)
+    var root = puzzle.axles.find(function(a) {
+        return a.meshParent === null && a.phaseOffset === undefined;
+    });
+    if (!root) return;  // All axles already configured
+
+    root.phaseOffset = 0;
+    var queue = [root.id];
+
+    while (queue.length > 0) {
+        var currentId = queue.shift();
+        var parent = axleMap[currentId];
+
+        puzzle.axles.forEach(function(axle) {
+            if (axle.meshParent === currentId && axle.phaseOffset === undefined) {
+                // For ring gear outer teeth, use outerTeeth instead of gears[]
+                var parentGearTeeth = axle.meshWithOuter && parent.outerTeeth
+                    ? parent.outerTeeth
+                    : parent.gears[axle.parentGearIdx];
+                var childGearTeeth = axle.gears[axle.meshGearIdx];
+
+                var dx = axle.pos[0] - parent.pos[0];
+                var dy = axle.pos[1] - parent.pos[1];
+                var meshAngle = Math.atan2(dy, dx);
+
+                axle.phaseOffset = GearMath.calculateChildPhase(
+                    parent.phaseOffset || 0, meshAngle, parentGearTeeth, childGearTeeth
+                );
+
+                queue.push(axle.id);
+            }
+        });
+    }
+}
+
+// Animation state
+var anim = {
+    ctx: null,
+    baseAngle: 0,
+    lastTime: 0
+};
+
+function init() {
+    setupPuzzle();
+
+    // Calculate bounds to fit all gears
+    var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    puzzle.axles.forEach(function(axle) {
+        var maxR = Math.max.apply(null, axle.gears) * puzzle.module / 2 + 1.5 * puzzle.module;
+        minX = Math.min(minX, axle.pos[0] - maxR);
+        maxX = Math.max(maxX, axle.pos[0] + maxR);
+        minY = Math.min(minY, axle.pos[1] - maxR);
+        maxY = Math.max(maxY, axle.pos[1] + maxR);
+    });
+
+    var margin = 5;
+    var canvas = document.getElementById('gear_canvas');
+    anim.ctx = graphics.init(canvas, [minX - margin, maxX + margin, minY - margin, maxY + margin]);
+
+    anim.lastTime = performance.now();
+    requestAnimationFrame(drawFrame);
+}
+
+function drawFrame(timestamp) {
+    var dt = (timestamp - anim.lastTime) / 1000;
+    anim.lastTime = timestamp;
+    anim.baseAngle += puzzle.baseSpeed * dt;
+
+    // Read slider values
+    var sunSpeed = parseFloat(document.getElementById('sunSlider').value);
+    var carrierSpeed = parseFloat(document.getElementById('carrierSlider').value);
+    document.getElementById('sunVal').textContent = sunSpeed.toFixed(2);
+    document.getElementById('carrierVal').textContent = carrierSpeed.toFixed(2);
+
+    // Update speeds based on sliders
+    // Planetary constraint (CCW-positive): sunTeeth*ωsun + ringTeeth*ωring = (sunTeeth+ringTeeth)*ωcarrier
+    var p = puzzle.planetary;
+    var ringSpeed = ((p.sunTeeth + p.ringTeeth) * carrierSpeed - p.sunTeeth * sunSpeed) / p.ringTeeth;
+
+    // Update orbiting gears
+    var axleMap = {};
+    puzzle.axles.forEach(function(a) { axleMap[a.id] = a; });
+
+    // Apply dynamic speeds
+    axleMap['sun'].speedMult = sunSpeed;
+    axleMap['ring'].speedMult = ringSpeed;
+    axleMap['carrier'].speedMult = carrierSpeed;
+    puzzle.axles.forEach(function(axle) {
+        if (axle.orbits) {
+            axle.speedMult = p.gearRatio * sunSpeed;
+            axle.orbitSpeed = carrierSpeed;
+        }
+    });
+
+    // Update gears meshing with carrier and ring outer teeth
+    if (axleMap['carrierMesh']) {
+        var cm = axleMap['carrierMesh'];
+        var carrier = axleMap['carrier'];
+        cm.speedMult = carrierSpeed * (p.carrierOuterTeeth / cm.gears[0]);
+        // Calculate phase offset
+        var dx = cm.pos[0] - carrier.pos[0];
+        var dy = cm.pos[1] - carrier.pos[1];
+        var meshAngle = Math.atan2(dy, dx);
+        cm.phaseOffset = GearMath.calculateChildPhase(
+            carrier.phaseOffset || 0, meshAngle, p.carrierOuterTeeth, cm.gears[0]
+        );
+    }
+    if (axleMap['ringMesh']) {
+        var rm = axleMap['ringMesh'];
+        var ring = axleMap['ring'];
+        var ringOuterTeeth = ring.outerTeeth;
+        rm.speedMult = ringSpeed * (ringOuterTeeth / rm.gears[0]);
+        // Calculate phase offset
+        var dx = rm.pos[0] - ring.pos[0];
+        var dy = rm.pos[1] - ring.pos[1];
+        var meshAngle = Math.atan2(dy, dx);
+        rm.phaseOffset = GearMath.calculateChildPhase(
+            ring.phaseOffset || 0, meshAngle, ringOuterTeeth, rm.gears[0]
+        );
+    }
+
+    puzzle.axles.forEach(function(axle) {
+        if (axle.orbits) {
+            var parent = axleMap[axle.orbits];
+            // CCW-positive: negate sin for y to match rotate convention
+            var orbitAngle = anim.baseAngle * axle.orbitSpeed + (axle.orbitPhase || 0);
+            axle.pos = [
+                parent.pos[0] + axle.orbitRadius * Math.cos(orbitAngle),
+                parent.pos[1] - axle.orbitRadius * Math.sin(orbitAngle)
+            ];
+            // Mesh angle is negated due to CCW convention (actual angle = -orbitAngle)
+            var meshAngle = -orbitAngle;
+            var parentGearTeeth = parent.gears[axle.parentGearIdx];
+            var childGearTeeth = axle.gears[axle.meshGearIdx];
+            axle.phaseOffset = GearMath.calculateChildPhase(
+                parent.phaseOffset || 0, meshAngle, parentGearTeeth, childGearTeeth
+            );
+        }
+    });
+
+    graphics.clear(anim.ctx);
+
+    // Draw gears back to front: large gears first, small gears on top, zPriority last
+    var sortedAxles = puzzle.axles.slice().sort(function(a, b) {
+        var zA = a.zPriority || 0;
+        var zB = b.zPriority || 0;
+        if (zA !== zB) return zA - zB;  // lower zPriority drawn first
+        // Sort by largest gear size descending (big gears drawn first/behind)
+        return Math.max.apply(null, b.gears) - Math.max.apply(null, a.gears);
+    });
+
+    sortedAxles.forEach(function(axle) {
+        var rotation = anim.baseAngle * axle.speedMult * axle.meshDir + (axle.phaseOffset || 0);
+
+        if (axle.isCarrier) {
+            // Draw carrier structure
+            var cs = axle.carrierShape;
+            var col = axle.colors[0];
+            var ctx = anim.ctx.context;
+            var cen = graphics.map_point(anim.ctx, axle.pos);
+
+            // Spoke rotation matches gear rotation (all CW-positive now)
+            var spokeRotation = rotation;
+            var spokeWidth = cs.spokeWidth;
+            var halfWidth = spokeWidth / 2;
+            var numSpokes = cs.spokeCount;
+
+            // Calculate half-angle of spoke at the outer rim
+            var halfSpokeAngle = Math.atan2(halfWidth, cs.outerRimInner);
+
+            // Draw outer gear + spokes as ONE unified shape
+            ctx.beginPath();
+
+            // Outer gear profile (rotated with gear teeth rotation for mesh)
+            var outerGear = gears.rotate(cs.outerGear, rotation);
+            outerGear = gears.translate(outerGear, axle.pos);
+            var mappedOuter = outerGear.map(function(p) {
+                return graphics.map_point(anim.ctx, p);
+            });
+            ctx.moveTo(mappedOuter[0][0], mappedOuter[0][1]);
+            for (var j = 1; j < mappedOuter.length; j++) {
+                ctx.lineTo(mappedOuter[j][0], mappedOuter[j][1]);
+            }
+            ctx.closePath();
+
+            // Inner cutout: arcs between spokes with CONSTANT WIDTH spokes (parallel edges)
+            var outerRimRWorld = cs.outerRimInner;
+            var innerRingOuterRWorld = cs.innerRingOuter;
+            var outerRimR = graphics.map_point(anim.ctx, [axle.pos[0] + outerRimRWorld, axle.pos[1]])[0] - cen[0];
+            var innerRingOuterR = graphics.map_point(anim.ctx, [axle.pos[0] + innerRingOuterRWorld, axle.pos[1]])[0] - cen[0];
+            var halfWidthMapped = graphics.map_point(anim.ctx, [halfWidth, 0])[0] - graphics.map_point(anim.ctx, [0, 0])[0];
+
+            for (var i = 0; i < numSpokes; i++) {
+                var spokeAngle = -(spokeRotation + i * 2 * Math.PI / numSpokes);
+                var nextSpokeAngle = -(spokeRotation + (i + 1) * 2 * Math.PI / numSpokes);
+
+                // For constant-width spokes, calculate where parallel edges intersect circles
+                // Spoke perpendicular direction
+                var perpX = -Math.sin(spokeAngle);
+                var perpY = Math.cos(spokeAngle);
+                var nextPerpX = -Math.sin(nextSpokeAngle);
+                var nextPerpY = Math.cos(nextSpokeAngle);
+
+                // Outer rim intersection angles for constant-width spoke edges
+                // Right edge of current spoke (offset by -halfWidth perpendicular)
+                var outerRightAngle = Math.atan2(
+                    outerRimR * Math.sin(spokeAngle) - halfWidthMapped * perpY,
+                    outerRimR * Math.cos(spokeAngle) - halfWidthMapped * perpX
+                );
+                // Left edge of next spoke (offset by +halfWidth perpendicular)
+                var outerLeftAngle = Math.atan2(
+                    outerRimR * Math.sin(nextSpokeAngle) + halfWidthMapped * nextPerpY,
+                    outerRimR * Math.cos(nextSpokeAngle) + halfWidthMapped * nextPerpX
+                );
+
+                // Inner ring intersection angles
+                var innerLeftAngle = Math.atan2(
+                    innerRingOuterR * Math.sin(nextSpokeAngle) + halfWidthMapped * nextPerpY,
+                    innerRingOuterR * Math.cos(nextSpokeAngle) + halfWidthMapped * nextPerpX
+                );
+                var innerRightAngle = Math.atan2(
+                    innerRingOuterR * Math.sin(nextSpokeAngle) - halfWidthMapped * nextPerpY,
+                    innerRingOuterR * Math.cos(nextSpokeAngle) - halfWidthMapped * nextPerpX
+                );
+
+                if (i === 0) {
+                    var startX = cen[0] + outerRimR * Math.cos(outerRightAngle);
+                    var startY = cen[1] + outerRimR * Math.sin(outerRightAngle);
+                    ctx.moveTo(startX, startY);
+                }
+
+                // Arc between spokes at outer rim
+                ctx.arc(cen[0], cen[1], outerRimR, outerRightAngle, outerLeftAngle, true);
+
+                // Line down left edge of next spoke (parallel, constant width)
+                var innerLeftX = cen[0] + innerRingOuterR * Math.cos(innerLeftAngle);
+                var innerLeftY = cen[1] + innerRingOuterR * Math.sin(innerLeftAngle);
+                ctx.lineTo(innerLeftX, innerLeftY);
+
+                // Arc across spoke root at inner ring
+                ctx.arc(cen[0], cen[1], innerRingOuterR, innerLeftAngle, innerRightAngle, true);
+
+                // Line up right edge of next spoke (parallel, constant width)
+                var nextOuterRightAngle = Math.atan2(
+                    outerRimR * Math.sin(nextSpokeAngle) - halfWidthMapped * nextPerpY,
+                    outerRimR * Math.cos(nextSpokeAngle) - halfWidthMapped * nextPerpX
+                );
+                var outerRightX = cen[0] + outerRimR * Math.cos(nextOuterRightAngle);
+                var outerRightY = cen[1] + outerRimR * Math.sin(nextOuterRightAngle);
+                ctx.lineTo(outerRightX, outerRightY);
+            }
+            ctx.closePath();
+
+            ctx.fillStyle = graphics.rgb_to_hex(col[0], col[1], col[2]);
+            ctx.fill('evenodd');
+            ctx.strokeStyle = '#0f0f23';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            // Draw inner ring (the continuous ring)
+            ctx.beginPath();
+            var innerRingInnerR = graphics.map_point(anim.ctx, [axle.pos[0] + cs.innerRingInner, axle.pos[1]])[0] - cen[0];
+
+            ctx.arc(cen[0], cen[1], innerRingOuterR, 0, 2 * Math.PI, false);
+            ctx.moveTo(cen[0] + innerRingInnerR, cen[1]);
+            ctx.arc(cen[0], cen[1], innerRingInnerR, 0, 2 * Math.PI, true);
+
+            ctx.fillStyle = graphics.rgb_to_hex(col[0], col[1], col[2]);
+            ctx.fill('evenodd');
+            ctx.strokeStyle = '#0f0f23';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            // Draw circles around each planet axle
+            var orbitRadius = puzzle.planetary.orbitRadius;
+            var axleCircleRadius = 2.3 * puzzle.module;  // Circle around planet gear
+            var axleHoleRadius = 0.8;  // Same as axle center hole
+
+            for (var i = 0; i < numSpokes; i++) {
+                // Use same angle calculation as orbit (CCW convention)
+                var orbitAngle = spokeRotation + i * 2 * Math.PI / numSpokes;
+                // Planet position in world coords (CCW: negate sin)
+                var planetWorldX = axle.pos[0] + orbitRadius * Math.cos(orbitAngle);
+                var planetWorldY = axle.pos[1] - orbitRadius * Math.sin(orbitAngle);
+                var planetScreen = graphics.map_point(anim.ctx, [planetWorldX, planetWorldY]);
+
+                var axleCircleRadiusMapped = graphics.map_point(anim.ctx, [0 + axleCircleRadius, 0])[0] - graphics.map_point(anim.ctx, [0, 0])[0];
+                var axleHoleRadiusMapped = graphics.map_point(anim.ctx, [0 + axleHoleRadius, 0])[0] - graphics.map_point(anim.ctx, [0, 0])[0];
+
+                ctx.beginPath();
+                // Outer circle
+                ctx.arc(planetScreen[0], planetScreen[1], axleCircleRadiusMapped, 0, 2 * Math.PI, false);
+                // Inner hole (cutout)
+                ctx.moveTo(planetScreen[0] + axleHoleRadiusMapped, planetScreen[1]);
+                ctx.arc(planetScreen[0], planetScreen[1], axleHoleRadiusMapped, 0, 2 * Math.PI, true);
+
+                ctx.fillStyle = graphics.rgb_to_hex(col[0], col[1], col[2]);
+                ctx.fill('evenodd');
+
+                // Stroke the inner hole
+                ctx.beginPath();
+                ctx.arc(planetScreen[0], planetScreen[1], axleHoleRadiusMapped, 0, 2 * Math.PI, false);
+                ctx.strokeStyle = '#0f0f23';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                // Calculate exposed arcs on planet circle:
+                // 1. Inner arc (inside carrier ring inner edge) - facing toward center
+                // 2. Two side arcs (in cutout areas beside the spoke) - between spoke edges and inner ring outer edge
+
+                var spokeAngleForPlanet = spokeRotation + i * 2 * Math.PI / numSpokes;
+
+                // Angle from planet center toward carrier center
+                var toCenterAngle = Math.atan2(cen[1] - planetScreen[1], cen[0] - planetScreen[0]);
+                // Angle from planet center toward outer ring (away from center)
+                var toOuterAngle = toCenterAngle + Math.PI;
+
+                var r1 = axleCircleRadiusMapped;
+                var d = Math.sqrt(Math.pow(planetScreen[0] - cen[0], 2) + Math.pow(planetScreen[1] - cen[1], 2));
+
+                // Circle-circle intersection helper
+                function circleCircleAngles(carrierRadius) {
+                    if (d > 0 && d < r1 + carrierRadius && d > Math.abs(r1 - carrierRadius)) {
+                        var cosA = (d * d + r1 * r1 - carrierRadius * carrierRadius) / (2 * d * r1);
+                        cosA = Math.max(-1, Math.min(1, cosA));
+                        var halfAngle = Math.acos(cosA);
+                        return { right: toCenterAngle - halfAngle, left: toCenterAngle + halfAngle };
+                    }
+                    return null;
+                }
+
+                // Intersections with inner ring edges
+                var innerRingInnerRMapped = graphics.map_point(anim.ctx, [axle.pos[0] + cs.innerRingInner, axle.pos[1]])[0] - cen[0];
+                var innerEdgeAngles = circleCircleAngles(innerRingInnerRMapped);
+                var outerEdgeAngles = circleCircleAngles(innerRingOuterR);
+
+                // Spoke edge angles (where planet circle meets spoke edges)
+                // Spoke is in the toOuterAngle direction (away from carrier center, toward outer ring)
+                var spokeHalfAngle = Math.asin(Math.min(1, halfWidthMapped / r1));
+                var rightSpokeAngle = toOuterAngle - spokeHalfAngle;
+                var leftSpokeAngle = toOuterAngle + spokeHalfAngle;
+
+                ctx.lineWidth = 2;
+
+                // Stroke visible arcs on planet circle
+                // Going CCW: innerEdge.right → innerEdge.left (inner) → outerEdge.left →
+                //            rightSpokeAngle (cutout) → leftSpokeAngle (spoke) → outerEdge.right (cutout)
+                ctx.strokeStyle = '#0f0f23';
+
+                if (innerEdgeAngles) {
+                    ctx.beginPath();
+                    ctx.arc(planetScreen[0], planetScreen[1], axleCircleRadiusMapped,
+                            innerEdgeAngles.right, innerEdgeAngles.left, false);
+                    ctx.stroke();
+                }
+
+                if (outerEdgeAngles) {
+                    ctx.beginPath();
+                    ctx.arc(planetScreen[0], planetScreen[1], axleCircleRadiusMapped,
+                            leftSpokeAngle, outerEdgeAngles.right, false);
+                    ctx.stroke();
+
+                    ctx.beginPath();
+                    ctx.arc(planetScreen[0], planetScreen[1], axleCircleRadiusMapped,
+                            outerEdgeAngles.left, rightSpokeAngle, false);
+                    ctx.stroke();
+                }
+            }
+        } else if (axle.isInternal) {
+            // Draw internal (ring) gear with optional external teeth
+            for (var g = 0; g < axle.gears.length; g++) {
+                var shapeData = axle.gearShapes[g];
+                var innerProfile = gears.rotate(shapeData.profile, rotation);
+                innerProfile = gears.translate(innerProfile, axle.pos);
+
+                var col = axle.colors[g];
+                var ctx = anim.ctx.context;
+                var cen = graphics.map_point(anim.ctx, axle.pos);
+
+                ctx.beginPath();
+
+                // Outer boundary: either gear teeth or plain circle
+                if (shapeData.outerProfile) {
+                    // External teeth on outside
+                    var outerProfile = gears.rotate(shapeData.outerProfile, rotation);
+                    outerProfile = gears.translate(outerProfile, axle.pos);
+                    var mappedOuter = outerProfile.map(function(p) {
+                        return graphics.map_point(anim.ctx, p);
+                    });
+                    ctx.moveTo(mappedOuter[0][0], mappedOuter[0][1]);
+                    for (var j = 1; j < mappedOuter.length; j++) {
+                        ctx.lineTo(mappedOuter[j][0], mappedOuter[j][1]);
+                    }
+                    ctx.closePath();
+                } else {
+                    // Plain circle outer boundary
+                    var outerR = shapeData.outerRadius;
+                    var edge = graphics.map_point(anim.ctx, [axle.pos[0] + outerR, axle.pos[1]]);
+                    var r = edge[0] - cen[0];
+                    ctx.arc(cen[0], cen[1], r, 0, 2 * Math.PI, false);
+                }
+
+                // Inner profile (counter-clockwise by reversing points)
+                var mappedInner = innerProfile.map(function(p) {
+                    return graphics.map_point(anim.ctx, p);
+                });
+                ctx.moveTo(mappedInner[0][0], mappedInner[0][1]);
+                for (var j = mappedInner.length - 1; j >= 0; j--) {
+                    ctx.lineTo(mappedInner[j][0], mappedInner[j][1]);
+                }
+                ctx.closePath();
+
+                ctx.fillStyle = graphics.rgb_to_hex(col[0], col[1], col[2]);
+                ctx.fill('evenodd');
+                ctx.strokeStyle = '#0f0f23';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+        } else {
+            // Draw external gears
+            var gearIndices = [];
+            for (var i = 0; i < axle.gears.length; i++) gearIndices.push(i);
+            gearIndices.sort(function(a, b) { return axle.gears[b] - axle.gears[a]; });
+
+            for (var gi = 0; gi < gearIndices.length; gi++) {
+                var g = gearIndices[gi];
+                var shape = gears.rotate(axle.gearShapes[g], rotation);
+                shape = gears.translate(shape, axle.pos);
+
+                var col = axle.colors[g];
+                graphics.color(anim.ctx, col[0], col[1], col[2]);
+                graphics.polyline(anim.ctx, shape, true);
+            }
+        }
+    });
+
+    // Draw axle centers on top
+    puzzle.axles.forEach(function(axle) {
+        graphics.color(anim.ctx, 30, 30, 50);
+        graphics.fillCircle(anim.ctx, axle.pos, 0.8);
+    });
+
+    requestAnimationFrame(drawFrame);
+}
+
+window.onload = init;
+</script>
+</body>
+</html>
